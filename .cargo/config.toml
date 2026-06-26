@@ -1,0 +1,5 @@
+# This machine has an old Rust 1.75 manually installed in /usr/bin that shadows
+# rustc on PATH. Pin the build to rustup's stable toolchain so modern crates
+# (axum 0.8, uuid 1.23, ...) compile. Remove this once /usr/bin/rustc is gone.
+[build]
+rustc = "/home/ultron/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc"

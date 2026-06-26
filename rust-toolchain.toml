@@ -1,0 +1,3 @@
+[toolchain]
+# Pin to rustup's stable so the build ignores the older /usr/bin/rustc on PATH.
+channel = "stable"
