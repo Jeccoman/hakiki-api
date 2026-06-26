@@ -93,3 +93,75 @@ pub struct WaitlistEntry {
     pub sector: Option<String>,
     pub created_at: DateTime<Utc>,
 }
+
+// --- enum <-> database text mappings -------------------------------------
+// Enums are stored as text columns. Keeping the conversions explicit (rather
+// than relying on a derive) makes the on-disk audit values obvious and stable.
+
+impl SubjectKind {
+    pub fn as_db(&self) -> &'static str {
+        match self {
+            SubjectKind::Person => "person",
+            SubjectKind::Business => "business",
+        }
+    }
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "business" => SubjectKind::Business,
+            _ => SubjectKind::Person,
+        }
+    }
+}
+
+impl CheckKind {
+    pub fn as_db(&self) -> &'static str {
+        match self {
+            CheckKind::TelcoIdentity => "telco_identity",
+            CheckKind::Nida => "nida",
+            CheckKind::Brela => "brela",
+            CheckKind::Tra => "tra",
+        }
+    }
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "nida" => CheckKind::Nida,
+            "brela" => CheckKind::Brela,
+            "tra" => CheckKind::Tra,
+            _ => CheckKind::TelcoIdentity,
+        }
+    }
+}
+
+impl Outcome {
+    pub fn as_db(&self) -> &'static str {
+        match self {
+            Outcome::Match => "match",
+            Outcome::NoMatch => "no_match",
+            Outcome::Pending => "pending",
+            Outcome::Unsupported => "unsupported",
+        }
+    }
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "no_match" => Outcome::NoMatch,
+            "pending" => Outcome::Pending,
+            "unsupported" => Outcome::Unsupported,
+            _ => Outcome::Match,
+        }
+    }
+}
+
+impl VerificationStatus {
+    pub fn as_db(&self) -> &'static str {
+        match self {
+            VerificationStatus::Completed => "completed",
+            VerificationStatus::Pending => "pending",
+        }
+    }
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "pending" => VerificationStatus::Pending,
+            _ => VerificationStatus::Completed,
+        }
+    }
+}

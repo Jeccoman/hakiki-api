@@ -1,36 +1,26 @@
 //! Shared application state.
 //!
-//! Storage is in-memory for now (HashMap/Vec behind locks) so the API runs with
-//! zero infra. Swapping these for a Postgres-backed repository later is a
-//! contained change — the routes only touch `AppState`, not the store directly.
+//! Backed by a Postgres connection pool. Routes hold a clone of `AppState`
+//! (cheap — `PgPool` and `Arc` are reference-counted) and never construct a
+//! connection themselves.
 
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-use uuid::Uuid;
+use sqlx::PgPool;
 
-use crate::domain::{Verification, WaitlistEntry};
 use crate::sources::telco::TelcoSource;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub verifications: Arc<RwLock<HashMap<Uuid, Verification>>>,
-    pub waitlist: Arc<RwLock<Vec<WaitlistEntry>>>,
+    pub pool: PgPool,
     pub telco: Arc<TelcoSource>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(pool: PgPool) -> Self {
         Self {
-            verifications: Arc::new(RwLock::new(HashMap::new())),
-            waitlist: Arc::new(RwLock::new(Vec::new())),
+            pool,
             telco: Arc::new(TelcoSource),
         }
-    }
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
     }
 }

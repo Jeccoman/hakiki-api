@@ -23,6 +23,17 @@ pub async fn join(
         created_at: Utc::now(),
     };
 
-    state.waitlist.write().unwrap().push(entry.clone());
+    sqlx::query(
+        "insert into waitlist_entries (id, company, email, sector, created_at)
+         values ($1, $2, $3, $4, $5)",
+    )
+    .bind(entry.id)
+    .bind(&entry.company)
+    .bind(&entry.email)
+    .bind(&entry.sector)
+    .bind(entry.created_at)
+    .execute(&state.pool)
+    .await?;
+
     Ok(Json(entry))
 }

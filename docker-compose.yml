@@ -1,0 +1,33 @@
+# Local dev / self-hosted deployment. The same image runs in production; only
+# DATABASE_URL and credentials change. Postgres data stays on a named volume.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: hakiki
+      POSTGRES_PASSWORD: hakiki
+      POSTGRES_DB: hakiki
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hakiki"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://hakiki:hakiki@db:5432/hakiki
+      BIND_ADDR: 0.0.0.0:8080
+      RUST_LOG: hakiki_api=debug,info
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

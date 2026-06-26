@@ -11,6 +11,7 @@ use serde_json::json;
 pub enum AppError {
     NotFound,
     BadRequest(String),
+    Internal(String),
 }
 
 impl IntoResponse for AppError {
@@ -18,7 +19,21 @@ impl IntoResponse for AppError {
         let (status, msg) = match self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            AppError::Internal(m) => {
+                // Log the detail, but don't leak internals to the caller.
+                tracing::error!("internal error: {m}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                )
+            }
         };
         (status, Json(json!({ "error": msg }))).into_response()
+    }
+}
+
+impl From<sqlx::Error> for AppError {
+    fn from(e: sqlx::Error) -> Self {
+        AppError::Internal(e.to_string())
     }
 }
