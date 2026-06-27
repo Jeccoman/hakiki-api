@@ -15,6 +15,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # --- runtime stage ----------------------------------------------------------
 FROM gcr.io/distroless/cc-debian12
 COPY --from=builder /usr/local/bin/hakiki-api /usr/local/bin/hakiki-api
-ENV BIND_ADDR=0.0.0.0:8080
-EXPOSE 8080
+ENV BIND_ADDR=127.0.0.1:8082
+EXPOSE 8082
 CMD ["hakiki-api"]
