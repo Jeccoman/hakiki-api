@@ -23,6 +23,7 @@ services:
       DATABASE_URL: postgres://hakiki:hakiki@db:5432/hakiki
       BIND_ADDR: 0.0.0.0:8080
       RUST_LOG: hakiki_api=debug,info
+      HAKIKI_DEMO_API_KEY: demo-public-key
     ports:
       - "8080:8080"
     depends_on:

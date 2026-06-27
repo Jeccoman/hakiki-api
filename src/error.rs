@@ -11,6 +11,7 @@ use serde_json::json;
 pub enum AppError {
     NotFound,
     BadRequest(String),
+    Unauthorized,
     Internal(String),
 }
 
@@ -19,6 +20,10 @@ impl IntoResponse for AppError {
         let (status, msg) = match self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
+            AppError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "missing or invalid API key".to_string(),
+            ),
             AppError::Internal(m) => {
                 // Log the detail, but don't leak internals to the caller.
                 tracing::error!("internal error: {m}");

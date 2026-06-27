@@ -1,3 +1,4 @@
+mod auth;
 mod db;
 mod domain;
 mod error;
@@ -28,6 +29,16 @@ async fn main() {
     let pool = db::connect_and_migrate(&database_url)
         .await
         .expect("failed to connect to database / run migrations");
+
+    // Seed a publishable demo key (used by the marketing-site live demo) if one
+    // is configured. Safe to expose while sources are mocked; real partner keys
+    // are issued separately and kept secret.
+    if let Ok(demo_key) = std::env::var("HAKIKI_DEMO_API_KEY") {
+        db::upsert_api_key(&pool, "public-demo", &demo_key)
+            .await
+            .expect("failed to seed demo API key");
+        tracing::info!("seeded 'public-demo' API key");
+    }
 
     let app = routes::router(state::AppState::new(pool))
         .layer(TraceLayer::new_for_http())
