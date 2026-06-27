@@ -1,3 +1,4 @@
+pub mod contact;
 pub mod health;
 pub mod verify;
 pub mod waitlist;
@@ -24,7 +25,8 @@ pub fn router(state: AppState) -> Router {
     // Health and the marketing-site waitlist stay public.
     let public = Router::new()
         .route("/health", get(health::health))
-        .route("/v1/waitlist", post(waitlist::join));
+        .route("/v1/waitlist", post(waitlist::join))
+        .route("/v1/contact", post(contact::submit));
 
     protected.merge(public).with_state(state)
 }

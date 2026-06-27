@@ -94,6 +94,24 @@ pub struct WaitlistEntry {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateContact {
+    pub name: String,
+    pub email: String,
+    pub organisation: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContactMessage {
+    pub id: Uuid,
+    pub name: String,
+    pub email: String,
+    pub organisation: Option<String>,
+    pub message: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 // --- enum <-> database text mappings -------------------------------------
 // Enums are stored as text columns. Keeping the conversions explicit (rather
 // than relying on a derive) makes the on-disk audit values obvious and stable.
