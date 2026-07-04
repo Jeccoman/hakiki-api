@@ -63,7 +63,7 @@ jobs:
             "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" << 'EOF'
           set -euo pipefail
           
-          cd /var/www/hakiki-api.aimsoftwares.com/
+          cd /var/www/api-hakiki.aimsoftwares.com/
           git fetch origin master
           git reset --hard FETCH_HEAD
           

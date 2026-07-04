@@ -10,11 +10,11 @@ COPY migrations ./migrations
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target \
     cargo build --release && \
-    cp /app/target/release/hakiki-api /usr/local/bin/hakiki-api
+    cp /app/target/release/hakiki-api /usr/local/bin/api-hakiki
 
 # --- runtime stage ----------------------------------------------------------
 FROM gcr.io/distroless/cc-debian12
-COPY --from=builder /usr/local/bin/hakiki-api /usr/local/bin/hakiki-api
+COPY --from=builder /usr/local/bin/api-hakiki /usr/local/bin/api-hakiki
 ENV BIND_ADDR=127.0.0.1:8082
 EXPOSE 8082
-CMD ["hakiki-api"]
+CMD ["api-hakiki"]
