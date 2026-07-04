@@ -55,7 +55,16 @@ async fn main() {
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
         .allow_methods(tower_http::cors::Any)
-        .allow_headers(tower_http::cors::Any)
+        .allow_headers(vec![
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+            axum::http::header::ORIGIN,
+            axum::http::HeaderName::from_static("x-api-key"),
+            axum::http::HeaderName::from_static("x-dashboard-token"),
+            axum::http::HeaderName::from_static("x-request-id"),
+            axum::http::HeaderName::from_static("x-requested-with"),
+        ])
         .allow_credentials(true);
 
     let app = routes::router(app_state.clone())
