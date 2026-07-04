@@ -2,9 +2,12 @@ mod auth;
 mod db;
 mod domain;
 mod error;
+mod middleware;
+mod risk;
 mod routes;
 mod sources;
 mod state;
+mod webhook_worker;
 
 use std::net::SocketAddr;
 
@@ -30,18 +33,31 @@ async fn main() {
         .await
         .expect("failed to connect to database / run migrations");
 
-    // Seed a publishable demo key (used by the marketing-site live demo) if one
-    // is configured. Safe to expose while sources are mocked; real partner keys
-    // are issued separately and kept secret.
+    // Seed demo organization + member + API key for marketing site + dashboard demo.
+    let _ = db::ensure_demo_organization(&pool).await;
     if let Ok(demo_key) = std::env::var("HAKIKI_DEMO_API_KEY") {
         db::upsert_api_key(&pool, "public-demo", &demo_key)
             .await
             .expect("failed to seed demo API key");
-        tracing::info!("seeded 'public-demo' API key");
+        tracing::info!("seeded demo organization + 'public-demo' API key");
     }
 
-    let app = routes::router(state::AppState::new(pool))
+    // Seed polished demo verification data for impressive demo
+    if let Err(e) = db::seed_demo_data_if_needed(&pool).await {
+        tracing::warn!("Demo data seed skipped or failed: {}", e);
+    }
+
+    let app_state = state::AppState::new(pool.clone());
+
+    // Start background webhook delivery worker
+    crate::webhook_worker::start_webhook_worker(app_state.clone());
+
+    let app = routes::router(app_state.clone())
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::request_id_and_logging,
+        ))
         // Permissive CORS is fine for local dev with the Next.js frontend;
         // tighten to the real origin before any public deployment.
         .layer(CorsLayer::permissive());
