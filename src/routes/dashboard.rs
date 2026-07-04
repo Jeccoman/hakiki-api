@@ -3,8 +3,12 @@ use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::domain::{DashboardContext, DashboardLoginRequest, DashboardLoginResponse, DashboardMe, MemberRole, Organization, OrganizationMember};
+use crate::domain::{
+    Consent, CreateVerification, DashboardContext, DashboardLoginRequest, DashboardLoginResponse, 
+    DashboardMe, Environment, MemberRole, Organization, OrganizationMember, Verification, VerificationStatus,
+};
 use crate::error::AppError;
+use crate::sources::VerificationSource;
 use crate::state::AppState;
 
 /// Login for dashboard. For MVP, looks up member by email (optionally scoped to org slug).
@@ -177,13 +181,44 @@ pub async fn list_verifications(
     Extension(ctx): Extension<DashboardContext>,
 ) -> Result<Json<Vec<crate::domain::Verification>>, AppError> {
     let org_id = ctx.organization_id;
-    // For now return empty list or simple query, full detail in separate endpoint.
-    // To avoid complex mapping for list, return basic.
-    let _ = sqlx::query("SELECT id FROM verifications WHERE organization_id = $1 LIMIT 10")
-        .bind(org_id)
-        .fetch_all(&state.pool)
-        .await;
-    Ok(Json(vec![]))
+
+    let rows: Vec<(Uuid, String, String, Option<String>, Option<String>, String, Option<String>, Option<i32>, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        r#"
+        SELECT id, subject_kind, subject_reference, subject_full_name, subject_phone, status, decision, risk_score, risk_level, created_at
+        FROM verifications 
+        WHERE organization_id = $1 
+        ORDER BY created_at DESC 
+        LIMIT 50
+        "#
+    )
+    .bind(org_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let list = rows.into_iter().map(|(id, kind, reference, full_name, phone, status_str, decision_str, risk_score, risk_level_str, created_at)| {
+        crate::domain::Verification {
+            id,
+            status: crate::domain::VerificationStatus::from_db(&status_str),
+            subject: crate::domain::Subject {
+                kind: crate::domain::SubjectKind::from_db(&kind),
+                reference,
+                full_name,
+                phone,
+            },
+            results: vec![], // list doesn't include full results for perf
+            created_at,
+            decision: decision_str.and_then(|s| crate::domain::Decision::from_db(&s)),
+            decision_reason: None,
+            risk_score,
+            risk_level: risk_level_str.and_then(|s| crate::domain::RiskLevel::from_db(&s)),
+            completed_at: None,
+            expires_at: None,
+            failure_reason: None,
+            environment: Some(crate::domain::Environment::Test),
+        }
+    }).collect();
+
+    Ok(Json(list))
 }
 
 pub async fn get_verification_detail(
@@ -204,21 +239,37 @@ pub async fn get_verification_detail(
         return Err(AppError::NotFound);
     }
 
-    // Load full data - simplified for MVP, return structured json
-    let verification: Option<(String, String, Option<String>, Option<String>, String, Option<String>, Option<i32>, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT subject_kind, subject_reference, subject_full_name, subject_phone, status, decision, risk_score, risk_level, created_at FROM verifications WHERE id = $1"
+    // Verification header
+    let verification_row: Option<(String, String, Option<String>, Option<String>, String, Option<String>, Option<i32>, Option<String>, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT subject_kind, subject_reference, subject_full_name, subject_phone, status, decision, risk_score, risk_level, created_at, completed_at 
+        FROM verifications WHERE id = $1
+        "#
     )
     .bind(id)
     .fetch_optional(&state.pool)
     .await?;
 
-    let check_results: Vec<(String, String, String, Option<f32>)> = sqlx::query_as(
-        "SELECT check_kind, outcome, detail, confidence FROM check_results WHERE verification_id = $1"
+    // Consent
+    let consent_row: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT method, granted_at FROM consents WHERE verification_id = $1 LIMIT 1"
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    // Check results with normalized/raw if present
+    let check_results: Vec<(String, String, String, Option<f32>, Option<String>, Option<serde_json::Value>, Option<serde_json::Value>)> = sqlx::query_as(
+        r#"
+        SELECT check_kind, outcome, detail, confidence, message, normalized_fields, raw_response 
+        FROM check_results WHERE verification_id = $1 ORDER BY created_at
+        "#
     )
     .bind(id)
     .fetch_all(&state.pool)
     .await?;
 
+    // Risk flags
     let risk_flags: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT code, severity, message FROM risk_flags WHERE verification_id = $1"
     )
@@ -226,19 +277,96 @@ pub async fn get_verification_detail(
     .fetch_all(&state.pool)
     .await?;
 
-    let review_notes: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT note, created_at FROM review_notes rn JOIN review_cases rc ON rn.review_case_id = rc.id WHERE rc.verification_id = $1"
+    // Risk score
+    let risk_score_row: Option<(i32, String, String)> = sqlx::query_as(
+        "SELECT score, level, decision FROM risk_scores WHERE verification_id = $1 ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    // Review case + notes
+    let review_case_row: Option<(Uuid, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, status, priority, created_at FROM review_cases WHERE verification_id = $1 LIMIT 1"
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let review_notes: Vec<(String, chrono::DateTime<chrono::Utc>)> = if let Some((rc_id, _, _, _)) = &review_case_row {
+        sqlx::query_as(
+            "SELECT note, created_at FROM review_notes WHERE review_case_id = $1 ORDER BY created_at"
+        )
+        .bind(rc_id)
+        .fetch_all(&state.pool)
+        .await?
+    } else { vec![] };
+
+    // Audit events
+    let audit_events: Vec<(String, Option<String>, Option<serde_json::Value>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT event_type, actor, payload, created_at FROM audit_events WHERE verification_id = $1 ORDER BY created_at"
     )
     .bind(id)
     .fetch_all(&state.pool)
     .await?;
 
+    // Webhook deliveries
+    let webhook_deliveries: Vec<(Uuid, String, String, Option<i32>, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, event_type, status, response_code, response_body, created_at FROM webhook_deliveries WHERE verification_id = $1 ORDER BY created_at"
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    // Related api request (last one for this verification? approximate by time or skip if not linked)
+    let api_request: Option<(String, String, Option<i32>, Option<i32>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT method, path, status_code, latency_ms, created_at FROM api_requests WHERE organization_id = $1 ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(org_id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    // Map verification row to object for frontend
+    let verification_obj = verification_row.map(|(kind, reference, full_name, phone, status, decision, risk_score, risk_level, created_at, completed_at)| {
+        json!({
+            "id": id,
+            "subject": {
+                "kind": kind,
+                "reference": reference,
+                "full_name": full_name,
+                "phone": phone,
+            },
+            "status": status,
+            "decision": decision,
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "created_at": created_at,
+            "completed_at": completed_at,
+            "environment": "test"
+        })
+    });
+
+    let check_results_obj: Vec<_> = check_results.into_iter().map(|(ck, out, det, conf, msg, norm, raw)| json!({
+        "check_kind": ck,
+        "outcome": out,
+        "detail": det,
+        "confidence": conf,
+        "message": msg,
+        "normalized_fields": norm,
+        "raw_response": raw
+    })).collect();
+
     Ok(Json(json!({
-        "verification": verification,
-        "check_results": check_results,
-        "risk_flags": risk_flags,
-        "review_notes": review_notes,
-        // add more as needed: consent, audit, etc.
+        "verification": verification_obj,
+        "consent": consent_row.map(|(m, g)| json!({"method": m, "granted_at": g})),
+        "check_results": check_results_obj,
+        "risk_flags": risk_flags.into_iter().map(|(c,s,m)| json!({"code":c,"severity":s,"message":m})).collect::<Vec<_>>(),
+        "risk_score": risk_score_row.map(|(s, l, d)| json!({"score": s, "level": l, "decision": d})),
+        "review_case": review_case_row.map(|(rid, st, pri, cr)| json!({"id": rid, "status": st, "priority": pri, "created_at": cr})),
+        "review_notes": review_notes.into_iter().map(|(n, ct)| json!({"note": n, "created_at": ct})).collect::<Vec<_>>(),
+        "audit_events": audit_events.into_iter().map(|(et, ac, pl, ct)| json!({"event_type": et, "actor": ac, "payload": pl, "created_at": ct})).collect::<Vec<_>>(),
+        "webhook_deliveries": webhook_deliveries.into_iter().map(|(wid, et, st, rc, rb, ct)| json!({"id": wid, "event_type": et, "status": st, "response_code": rc, "response_body": rb, "created_at": ct})).collect::<Vec<_>>(),
+        "related_api_request": api_request.map(|(m, p, sc, lat, ct)| json!({"method": m, "path": p, "status_code": sc, "latency_ms": lat, "created_at": ct})),
     })))
 }
 
@@ -294,4 +422,102 @@ pub async fn create_api_key(
         "environment": env,
         "raw_key": raw_key, // shown only once
     })))
+}
+
+/// Create verification from dashboard (uses dashboard member context)
+pub async fn create_verification(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+    Json(req): Json<CreateVerification>,
+) -> Result<Json<Verification>, AppError> {
+    if req.checks.is_empty() {
+        return Err(AppError::BadRequest("at least one check is required".into()));
+    }
+
+    let org_id = ctx.organization_id;
+    let now = Utc::now();
+    let verification_id = Uuid::new_v4();
+    let env = Environment::Test;
+    let actor = format!("dashboard:{}", ctx.email);
+
+    // Execute sources
+    let mut normalized_results: Vec<crate::domain::NormalizedCheckResult> = Vec::new();
+    let mut legacy_results: Vec<crate::domain::CheckResult> = Vec::new();
+
+    for check in &req.checks {
+        let norm = match check {
+            crate::domain::CheckKind::TelcoIdentity => state.telco.as_ref().verify(&req.subject).await,
+            crate::domain::CheckKind::Nida => state.nida.as_ref().verify(&req.subject).await,
+            crate::domain::CheckKind::Brela => state.brela.as_ref().verify(&req.subject).await,
+            crate::domain::CheckKind::Tra => state.tra.as_ref().verify(&req.subject).await,
+            crate::domain::CheckKind::BankAccount => state.bank.as_ref().verify(&req.subject).await,
+        };
+
+        legacy_results.push(crate::domain::CheckResult {
+            check: norm.check_kind,
+            outcome: norm.outcome.clone(),
+            detail: norm.message.clone().unwrap_or_else(|| norm.source.clone()),
+            confidence: norm.confidence,
+            message: norm.message.clone(),
+        });
+
+        normalized_results.push(norm);
+    }
+
+    // Risk scoring
+    let assessment: crate::domain::RiskAssessment = crate::risk::score_verification(
+        &normalized_results,
+        req.subject.full_name.as_deref(),
+        req.subject.phone.as_deref(),
+    );
+
+    // Decide
+    let (status, decision, completed_at) = match assessment.decision {
+        crate::domain::Decision::Approved => (VerificationStatus::Approved, Some(crate::domain::Decision::Approved), Some(now)),
+        crate::domain::Decision::NeedsReview => (VerificationStatus::NeedsReview, Some(crate::domain::Decision::NeedsReview), None),
+        crate::domain::Decision::Rejected => (VerificationStatus::Rejected, Some(crate::domain::Decision::Rejected), Some(now)),
+        crate::domain::Decision::Failed => (VerificationStatus::Failed, Some(crate::domain::Decision::Failed), Some(now)),
+    };
+
+    let risk_score = assessment.score;
+    let risk_level = assessment.level.clone();
+
+    // Persist
+    crate::db::persist_created_verification(
+        &state.pool,
+        verification_id,
+        org_id,
+        &req.subject,
+        status.clone(),
+        decision.clone(),
+        risk_score,
+        risk_level.clone(),
+        now,
+        completed_at,
+        env.clone(),
+        &normalized_results,
+        &assessment,
+        &req.checks,
+        &actor,
+        &req.consent,
+    ).await?;
+
+    // Build response
+    let verification = Verification {
+        id: verification_id,
+        status,
+        subject: req.subject,
+        results: legacy_results,
+        created_at: now,
+        decision,
+        decision_reason: None,
+        risk_score: Some(risk_score),
+        risk_level: Some(risk_level),
+        completed_at,
+        expires_at: Some(now + chrono::Duration::days(90)),
+        failure_reason: None,
+        environment: Some(env),
+    };
+
+    Ok(Json(verification))
 }
