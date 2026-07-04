@@ -42,6 +42,11 @@ async fn main() {
         tracing::info!("seeded demo organization + 'public-demo' API key");
     }
 
+    // Seed polished demo verification data for impressive demo
+    if let Err(e) = db::seed_demo_data_if_needed(&pool).await {
+        tracing::warn!("Demo data seed skipped or failed: {}", e);
+    }
+
     let app_state = state::AppState::new(pool.clone());
 
     // Start background webhook delivery worker
