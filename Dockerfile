@@ -1,21 +1,20 @@
 # --- build stage -----------------------------------------------------------
-# Uses the image's own toolchain (the .cargo/config.toml rustc pin is excluded
-# via .dockerignore — that hack is only for the host's old /usr/bin/rustc).
 FROM rust:1-slim AS builder
 WORKDIR /app
 
-# Cache dependencies separately from source.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
-
 COPY src ./src
 COPY migrations ./migrations
-RUN touch src/main.rs && cargo build --release
+
+# Mount cargo registry and git cache, and compile using cache mounts
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && \
+    cp /app/target/release/hakiki-api /usr/local/bin/hakiki-api
 
 # --- runtime stage ----------------------------------------------------------
-# distroless: no shell, minimal attack surface. rustls means no OpenSSL needed.
 FROM gcr.io/distroless/cc-debian12
-COPY --from=builder /app/target/release/hakiki-api /usr/local/bin/hakiki-api
-ENV BIND_ADDR=0.0.0.0:8080
-EXPOSE 8080
+COPY --from=builder /usr/local/bin/hakiki-api /usr/local/bin/hakiki-api
+ENV BIND_ADDR=127.0.0.1:8082
+EXPOSE 8082
 CMD ["hakiki-api"]
