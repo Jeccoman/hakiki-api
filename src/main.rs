@@ -53,7 +53,7 @@ async fn main() {
     crate::webhook_worker::start_webhook_worker(app_state.clone());
 
     let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::mirror_request_origin())
+        .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
         .allow_credentials(true);
