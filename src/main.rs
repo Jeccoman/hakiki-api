@@ -7,6 +7,7 @@ mod risk;
 mod routes;
 mod sources;
 mod state;
+mod webhook_worker;
 
 use std::net::SocketAddr;
 
@@ -32,17 +33,19 @@ async fn main() {
         .await
         .expect("failed to connect to database / run migrations");
 
-    // Seed a publishable demo key (used by the marketing-site live demo) if one
-    // is configured. Safe to expose while sources are mocked; real partner keys
-    // are issued separately and kept secret.
+    // Seed demo organization + member + API key for marketing site + dashboard demo.
+    let _ = db::ensure_demo_organization(&pool).await;
     if let Ok(demo_key) = std::env::var("HAKIKI_DEMO_API_KEY") {
         db::upsert_api_key(&pool, "public-demo", &demo_key)
             .await
             .expect("failed to seed demo API key");
-        tracing::info!("seeded 'public-demo' API key");
+        tracing::info!("seeded demo organization + 'public-demo' API key");
     }
 
-    let app_state = state::AppState::new(pool);
+    let app_state = state::AppState::new(pool.clone());
+
+    // Start background webhook delivery worker
+    crate::webhook_worker::start_webhook_worker(app_state.clone());
 
     let app = routes::router(app_state.clone())
         .layer(TraceLayer::new_for_http())

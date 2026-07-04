@@ -1,5 +1,6 @@
 pub mod api_requests;
 pub mod contact;
+pub mod dashboard;
 pub mod health;
 pub mod reviews;
 pub mod sources;
@@ -13,7 +14,7 @@ use axum::{
     Router,
 };
 
-use crate::auth::require_api_key;
+use crate::auth::{require_api_key, require_dashboard_auth};
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
@@ -31,6 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/webhook-endpoints/{id}", delete(webhooks::delete))
         .route("/v1/webhook-endpoints/{id}/test", post(webhooks::test))
         .route("/v1/webhook-deliveries", get(webhooks::deliveries))
+        .route("/v1/webhook-deliveries/{id}/resend", post(webhooks::resend))
         // Reviews
         .route("/v1/review-cases", get(reviews::list))
         .route("/v1/review-cases/{id}", get(reviews::get_one))
@@ -46,7 +48,21 @@ pub fn router(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(health::health))
         .route("/v1/waitlist", post(waitlist::join))
-        .route("/v1/contact", post(contact::submit));
+        .route("/v1/contact", post(contact::submit))
+        .route("/dashboard/auth/login", post(dashboard::login));
 
-    protected.merge(public).with_state(state)
+    // Dashboard routes protected by dashboard auth
+    let protected_dashboard = Router::new()
+        .route("/dashboard/me", get(dashboard::me))
+        .route("/dashboard/auth/logout", post(dashboard::logout))
+        .route("/dashboard/overview", get(dashboard::overview))
+        .route("/dashboard/verifications", get(dashboard::list_verifications))
+        .route("/dashboard/verifications/{id}", get(dashboard::get_verification_detail))
+        .route("/dashboard/api-keys", get(dashboard::list_api_keys).post(dashboard::create_api_key))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_dashboard_auth,
+        ));
+
+    protected.merge(public).merge(protected_dashboard).with_state(state)
 }

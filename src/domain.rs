@@ -80,7 +80,7 @@ pub struct NormalizedCheckResult {
     pub raw_response: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CreateVerification {
     pub subject: Subject,
     pub checks: Vec<CheckKind>,
@@ -428,4 +428,123 @@ impl RiskLevel {
             _ => None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-tenant Organization & Member model
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrgStatus {
+    Active,
+    Suspended,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberRole {
+    Owner,
+    Admin,
+    Developer,
+    ComplianceReviewer,
+    Viewer,
+}
+
+impl MemberRole {
+    pub fn as_db(&self) -> &'static str {
+        match self {
+            MemberRole::Owner => "owner",
+            MemberRole::Admin => "admin",
+            MemberRole::Developer => "developer",
+            MemberRole::ComplianceReviewer => "compliance_reviewer",
+            MemberRole::Viewer => "viewer",
+        }
+    }
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "owner" => MemberRole::Owner,
+            "admin" => MemberRole::Admin,
+            "developer" => MemberRole::Developer,
+            "compliance_reviewer" => MemberRole::ComplianceReviewer,
+            _ => MemberRole::Viewer,
+        }
+    }
+
+    pub fn can_manage_keys(&self) -> bool {
+        matches!(self, MemberRole::Owner | MemberRole::Admin)
+    }
+
+    pub fn can_manage_webhooks(&self) -> bool {
+        matches!(self, MemberRole::Owner | MemberRole::Admin | MemberRole::Developer)
+    }
+
+    pub fn can_review_cases(&self) -> bool {
+        matches!(self, MemberRole::Owner | MemberRole::Admin | MemberRole::ComplianceReviewer)
+    }
+
+    pub fn can_view_audit(&self) -> bool {
+        true // for demo; tighten later
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Organization {
+    pub id: Uuid,
+    pub name: String,
+    pub slug: String,
+    pub status: OrgStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OrganizationMember {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub email: String,
+    pub role: MemberRole,
+    pub created_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Auth context attached after successful auth (for /v1 API keys)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct AuthContext {
+    pub api_key_id: Uuid,
+    pub organization_id: Uuid,
+    pub partner_name: String,
+    pub environment: Environment,
+}
+
+// Simple dashboard context foundation (will be replaced by real user sessions later)
+#[derive(Debug, Clone)]
+pub struct DashboardContext {
+    pub member_id: Uuid,
+    pub organization_id: Uuid,
+    pub email: String,
+    pub role: MemberRole,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DashboardLoginRequest {
+    pub email: String,
+    pub organization_slug: Option<String>, // for demo, optional
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardLoginResponse {
+    pub token: String,
+    pub member: OrganizationMember,
+    pub organization: Organization,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardMe {
+    pub member: OrganizationMember,
+    pub organization: Organization,
 }

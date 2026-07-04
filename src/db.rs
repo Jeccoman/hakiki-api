@@ -19,17 +19,51 @@ pub async fn connect_and_migrate(database_url: &str) -> Result<PgPool, sqlx::Err
     Ok(pool)
 }
 
-/// Idempotently register an API key (by name). Used to seed the publishable
-/// demo key on startup so the marketing-site demo works out of the box.
-/// Real partner keys should be issued out-of-band, not via env.
-pub async fn upsert_api_key(pool: &PgPool, name: &str, raw_key: &str) -> Result<(), sqlx::Error> {
-    // Default demo key to test environment
+/// Ensures a demo organization exists for the marketing site demo.
+pub async fn ensure_demo_organization(pool: &PgPool) -> Result<Uuid, sqlx::Error> {
+    let org_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+
     sqlx::query(
-        "insert into api_keys (id, partner_name, key_hash, environment)
-         values ($1, $2, $3, 'test')
-         on conflict (key_hash) do nothing",
+        r#"
+        INSERT INTO organizations (id, name, slug, status)
+        VALUES ($1, 'Hakiki Demo', 'demo', 'active')
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(org_id)
+    .execute(pool)
+    .await?;
+
+    // Ensure a demo member
+    sqlx::query(
+        r#"
+        INSERT INTO organization_members (id, organization_id, email, role)
+        VALUES ($1, $2, 'demo@hakiki.test', 'admin')
+        ON CONFLICT (organization_id, email) DO NOTHING
+        "#,
+    )
+    .bind(Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap())
+    .bind(org_id)
+    .execute(pool)
+    .await?;
+
+    Ok(org_id)
+}
+
+/// Idempotently register an API key (by name) and attach to demo org.
+/// Used to seed the publishable demo key...
+pub async fn upsert_api_key(pool: &PgPool, name: &str, raw_key: &str) -> Result<(), sqlx::Error> {
+    let demo_org_id = ensure_demo_organization(pool).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO api_keys (id, organization_id, partner_name, key_hash, environment)
+        VALUES ($1, $2, $3, $4, 'test')
+        ON CONFLICT (key_hash) DO UPDATE SET organization_id = EXCLUDED.organization_id
+        "#,
     )
     .bind(Uuid::new_v4())
+    .bind(demo_org_id)
     .bind(name)
     .bind(sha256_hex(raw_key))
     .execute(pool)

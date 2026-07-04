@@ -12,6 +12,27 @@ Consent-first KYC / KYB verification infrastructure for Tanzania.
 
 **Important**: This is **not** connected to live NIDA / BRELA / TRA / telco production systems. All adapters are deterministic mocks for development, demos, and early partner testing.
 
+## Multi-tenant & Customer Ready Features
+
+- Organizations + Members (owner/admin/developer/compliance_reviewer/viewer)
+- All resources (verifications, keys, webhooks, reviews, logs, audit) scoped to organization_id. Full audit performed.
+- API keys linked to organizations
+- Idempotency-Key header support on verification creation (replay + conflict)
+- Working webhook delivery worker with retries, backoff, Hakiki-Signature (HMAC)
+- Real rate limiting per API key (env HAKIKI_RATE_LIMIT_PER_MINUTE, 429 + headers)
+- Dashboard auth: POST /dashboard/auth/login (email), use token in X-Dashboard-Token
+- Role/permission enforcement on dashboard
+- API key management from dashboard
+- Dashboard verification detail, review, developer endpoints
+
+Demo org auto created. Use demo-public-key for /v1.
+
+Dashboard login example: POST /dashboard/auth/login with {"email": "demo@hakiki.test"}
+
+Protected dashboard use X-Dashboard-Token: <token from login>
+
+Role checks active (e.g. for api-keys).
+
 ## Run locally
 
 ```bash
