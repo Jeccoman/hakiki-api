@@ -52,15 +52,19 @@ async fn main() {
     // Start background webhook delivery worker
     crate::webhook_worker::start_webhook_worker(app_state.clone());
 
+    let cors = CorsLayer::new()
+        .allow_origin(tower_http::cors::AllowOrigin::mirror_request_origin())
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any)
+        .allow_credentials(true);
+
     let app = routes::router(app_state.clone())
         .layer(TraceLayer::new_for_http())
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             crate::middleware::request_id_and_logging,
         ))
-        // Permissive CORS is fine for local dev with the Next.js frontend;
-        // tighten to the real origin before any public deployment.
-        .layer(CorsLayer::permissive());
+        .layer(cors);
 
     // Bind 127.0.0.1 locally; containers set BIND_ADDR=0.0.0.0:8080.
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
