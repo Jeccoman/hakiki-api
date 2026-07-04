@@ -14,7 +14,7 @@ use crate::state::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub async fn start_webhook_worker(state: AppState) {
+pub fn start_webhook_worker(state: AppState) {
     tokio::spawn(async move {
         loop {
             if let Err(e) = process_due_deliveries(&state).await {

@@ -59,6 +59,15 @@ pub fn router(state: AppState) -> Router {
         .route("/dashboard/verifications", get(dashboard::list_verifications).post(dashboard::create_verification))
         .route("/dashboard/verifications/{id}", get(dashboard::get_verification_detail))
         .route("/dashboard/api-keys", get(dashboard::list_api_keys).post(dashboard::create_api_key))
+        .route("/dashboard/review-cases", get(dashboard::list_review_cases))
+        .route("/dashboard/review-cases/{id}", get(dashboard::get_review_case))
+        .route("/dashboard/review-cases/{id}/approve", post(dashboard::approve_review_case))
+        .route("/dashboard/review-cases/{id}/reject", post(dashboard::reject_review_case))
+        .route("/dashboard/review-cases/{id}/notes", post(dashboard::add_review_note))
+        .route("/dashboard/webhook-deliveries", get(dashboard::list_webhook_deliveries))
+        .route("/dashboard/webhook-deliveries/{id}/resend", post(dashboard::resend_webhook_delivery))
+        .route("/dashboard/api-requests", get(dashboard::list_api_requests))
+        .route("/dashboard/sources", get(dashboard::list_sources))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_dashboard_auth,

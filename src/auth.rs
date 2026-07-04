@@ -65,9 +65,13 @@ pub async fn require_api_key(
         partner_name,
         environment,
     };
-    req.extensions_mut().insert(ctx);
+    req.extensions_mut().insert(ctx.clone());
 
-    Ok(next.run(req).await)
+    let mut res = next.run(req).await;
+    // Expose the context to outer layers (request logging runs outside this
+    // route_layer and only sees the response).
+    res.extensions_mut().insert(ctx);
+    Ok(res)
 }
 
 /// Dashboard auth using session token from header "X-Dashboard-Token".
