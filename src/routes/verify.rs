@@ -49,11 +49,11 @@ pub async fn create(
 
     for check in &req.checks {
         let norm = match check {
-            CheckKind::TelcoIdentity => state.telco.verify(&req.subject).await,
-            CheckKind::Nida => state.nida.verify(&req.subject).await,
-            CheckKind::Brela => state.brela.verify(&req.subject).await,
-            CheckKind::Tra => state.tra.verify(&req.subject).await,
-            CheckKind::BankAccount => state.bank.verify(&req.subject).await,
+            CheckKind::TelcoIdentity => state.telco.as_ref().verify(&req.subject).await,
+            CheckKind::Nida => state.nida.as_ref().verify(&req.subject).await,
+            CheckKind::Brela => state.brela.as_ref().verify(&req.subject).await,
+            CheckKind::Tra => state.tra.as_ref().verify(&req.subject).await,
+            CheckKind::BankAccount => state.bank.as_ref().verify(&req.subject).await,
         };
 
         // Legacy simple view for response compatibility
@@ -86,156 +86,25 @@ pub async fn create(
     let risk_score = assessment.score;
     let risk_level = assessment.level.clone();
 
-    // 4. Persist everything in one transaction (append-only spirit)
-    let mut tx = state.pool.begin().await?;
-
-    // Insert verification header with new columns + organization scoping
-    sqlx::query(
-        r#"
-        INSERT INTO verifications
-          (id, organization_id, subject_kind, subject_reference, subject_full_name, subject_phone,
-           status, decision, decision_reason, risk_score, risk_level,
-           created_at, completed_at, environment, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-        "#,
-    )
-    .bind(verification_id)
-    .bind(org_id)
-    .bind(req.subject.kind.as_db())
-    .bind(&req.subject.reference)
-    .bind(&req.subject.full_name)
-    .bind(&req.subject.phone)
-    .bind(status.as_db())
-    .bind(decision.as_ref().map(|d| d.as_db()))
-    .bind(None::<String>) // decision_reason filled later by review if needed
-    .bind(risk_score)
-    .bind(risk_level.as_db())
-    .bind(now)
-    .bind(completed_at)
-    .bind(ctx.environment.as_db())
-    .bind(now)
-    .execute(&mut *tx)
-    .await?;
-
-    // Consent (unchanged requirement) + org
-    sqlx::query(
-        "INSERT INTO consents (id, organization_id, verification_id, method, granted_at) VALUES ($1,$2,$3,$4,$5)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(org_id)
-    .bind(verification_id)
-    .bind(&req.consent.method)
-    .bind(req.consent.granted_at)
-    .execute(&mut *tx)
-    .await?;
-
-    // Store check results (enhanced) + org
-    for norm in &normalized_results {
-        sqlx::query(
-            r#"
-            INSERT INTO check_results
-              (id, organization_id, verification_id, check_kind, outcome, detail, confidence, message,
-               normalized_fields, raw_response, created_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(org_id)
-        .bind(verification_id)
-        .bind(norm.check_kind.as_db())
-        .bind(norm.outcome.as_db())
-        .bind(norm.message.clone().unwrap_or_default())
-        .bind(norm.confidence)
-        .bind(&norm.message)
-        .bind(&norm.normalized_fields)
-        .bind(&norm.raw_response)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    // Persist risk score + flags + org
-    sqlx::query(
-        "INSERT INTO risk_scores (id, organization_id, verification_id, score, level, decision, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(org_id)
-    .bind(verification_id)
-    .bind(risk_score)
-    .bind(risk_level.as_db())
-    .bind(assessment.decision.as_db())
-    .bind(now)
-    .execute(&mut *tx)
-    .await?;
-
-    for flag in &assessment.flags {
-        sqlx::query(
-            "INSERT INTO risk_flags (id, organization_id, verification_id, code, severity, message, source, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(org_id)
-        .bind(verification_id)
-        .bind(&flag.code)
-        .bind(&flag.severity)
-        .bind(&flag.message)
-        .bind(&flag.source)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    // Audit event + org
-    sqlx::query(
-        "INSERT INTO audit_events (id, organization_id, verification_id, event_type, actor, payload, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)",
-    )
-    .bind(Uuid::new_v4())
-    .bind(org_id)
-    .bind(verification_id)
-    .bind("verification.created")
-    .bind("system:engine")
-    .bind(serde_json::json!({
-        "checks": req.checks.iter().map(|c| c.as_db()).collect::<Vec<_>>(),
-        "risk_score": risk_score,
-        "decision": assessment.decision.as_db(),
-    }))
-    .bind(now)
-    .execute(&mut *tx)
-    .await?;
-
-    // Create review case if needed + org
-    if status == VerificationStatus::NeedsReview {
-        sqlx::query(
-            "INSERT INTO review_cases (id, organization_id, verification_id, status, priority, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(org_id)
-        .bind(verification_id)
-        .bind("open")
-        .bind("medium")
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            "INSERT INTO audit_events (id, organization_id, verification_id, event_type, actor, payload, created_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)",
-        )
-        .bind(Uuid::new_v4())
-        .bind(org_id)
-        .bind(verification_id)
-        .bind("review.case_created")
-        .bind("system:risk-engine")
-        .bind(serde_json::json!({ "reason": "risk_score_or_flags" }))
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    tx.commit().await?;
+    // Persist using shared function
+    crate::db::persist_created_verification(
+        &state.pool,
+        verification_id,
+        org_id,
+        &req.subject,
+        status.clone(),
+        decision.clone(),
+        risk_score,
+        risk_level.clone(),
+        now,
+        completed_at,
+        ctx.environment,
+        &normalized_results,
+        &assessment,
+        &req.checks,
+        "system:engine",
+        &req.consent,
+    ).await?;
 
     let request_hash = crate::auth::sha256_hex(&serde_json::to_string(&req).unwrap_or_default());
 
