@@ -56,7 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/dashboard/me", get(dashboard::me))
         .route("/dashboard/auth/logout", post(dashboard::logout))
         .route("/dashboard/overview", get(dashboard::overview))
-        .route("/dashboard/verifications", get(dashboard::list_verifications))
+        .route("/dashboard/verifications", get(dashboard::list_verifications).post(dashboard::create_verification))
         .route("/dashboard/verifications/{id}", get(dashboard::get_verification_detail))
         .route("/dashboard/api-keys", get(dashboard::list_api_keys).post(dashboard::create_api_key))
         .route_layer(middleware::from_fn_with_state(
