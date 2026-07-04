@@ -72,14 +72,14 @@ pub async fn request_id_and_logging(
         .unwrap_or("")
         .to_string();
 
-    // Try to get auth context for org scoping (may not be present for public routes)
-    let (org_id, api_key_id) = if let Some(ctx) = req.extensions().get::<AuthContext>() {
-        (Some(ctx.organization_id), Some(ctx.api_key_id))
-    } else {
-        (None, None)
-    };
+    // Auth runs inside the inner route_layer, so the request has no
+    // AuthContext yet; rate-limit on the presented key header instead.
+    let presented_key = req
+        .headers()
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
-    // Rate limiting if API key context present
     let limit = std::env::var("HAKIKI_RATE_LIMIT_PER_MINUTE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -89,9 +89,8 @@ pub async fn request_id_and_logging(
     let mut remaining = limit;
     let mut reset = 60u64;
 
-    if let Some(key_id) = api_key_id {
-        let key_str = key_id.to_string();
-        let (ex, rem, rst) = check_rate_limit(&key_str, limit);
+    if let Some(key) = &presented_key {
+        let (ex, rem, rst) = check_rate_limit(key, limit);
         exceeded = ex;
         remaining = rem;
         reset = rst;
@@ -117,6 +116,13 @@ pub async fn request_id_and_logging(
 
     let latency = start.elapsed().as_millis() as i32;
     let status = response.status().as_u16() as i32;
+
+    // The API-key middleware propagates the resolved context on the response.
+    let (org_id, api_key_id) = if let Some(ctx) = response.extensions().get::<AuthContext>() {
+        (Some(ctx.organization_id), Some(ctx.api_key_id))
+    } else {
+        (None, None)
+    };
 
     // Best-effort insert (do not fail the response)
     let _ = sqlx::query(

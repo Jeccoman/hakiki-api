@@ -98,10 +98,10 @@ pub async fn login(
     }))
 }
 
-pub async fn me(Extension(ctx): Extension<DashboardContext>) -> Result<Json<DashboardMe>, AppError> {
-    // For simplicity, re-fetch or construct. In real would load fresh.
-    // Here we return from ctx, but to match types, create minimal.
-    // Note: full load would require more, but for MVP use ctx data.
+pub async fn me(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+) -> Result<Json<DashboardMe>, AppError> {
     let member = OrganizationMember {
         id: ctx.member_id,
         organization_id: ctx.organization_id,
@@ -109,13 +109,25 @@ pub async fn me(Extension(ctx): Extension<DashboardContext>) -> Result<Json<Dash
         role: ctx.role.clone(),
         created_at: Utc::now(),
     };
+
+    let org_row: Option<(String, String, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT name, slug, status, created_at, updated_at FROM organizations WHERE id = $1")
+            .bind(ctx.organization_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let (name, slug, status, created_at, updated_at) = org_row.ok_or(AppError::NotFound)?;
+
     let organization = Organization {
         id: ctx.organization_id,
-        name: "Demo Org".to_string(),
-        slug: "demo".to_string(),
-        status: crate::domain::OrgStatus::Active,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
+        name,
+        slug,
+        status: match status.as_str() {
+            "active" => crate::domain::OrgStatus::Active,
+            "suspended" => crate::domain::OrgStatus::Suspended,
+            _ => crate::domain::OrgStatus::Deleted,
+        },
+        created_at,
+        updated_at,
     };
     Ok(Json(DashboardMe { member, organization }))
 }
@@ -158,21 +170,62 @@ pub async fn overview(
         .await
         .unwrap_or((0,));
 
-    let avg_risk: Option<f64> = sqlx::query_scalar("SELECT AVG(risk_score) FROM verifications WHERE organization_id = $1 AND risk_score IS NOT NULL")
+    let rejected: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM verifications WHERE organization_id = $1 AND status = 'rejected'")
+        .bind(org_id)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or((0,));
+
+    let avg_risk: Option<f64> = sqlx::query_scalar("SELECT AVG(risk_score)::float8 FROM verifications WHERE organization_id = $1 AND risk_score IS NOT NULL")
         .bind(org_id)
         .fetch_optional(&state.pool)
         .await
         .unwrap_or(None);
 
+    // Delivered / terminal deliveries; None when there is nothing to measure yet.
+    let webhook_counts: (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*) FILTER (WHERE status = 'delivered'), COUNT(*) FILTER (WHERE status IN ('delivered', 'failed'))
+         FROM webhook_deliveries WHERE organization_id = $1",
+    )
+    .bind(org_id)
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or((0, 0));
+    let webhook_success_rate = if webhook_counts.1 > 0 {
+        Some(webhook_counts.0 as f64 / webhook_counts.1 as f64)
+    } else {
+        None
+    };
+
+    let recent_audit_events: Vec<(String, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT event_type, actor, created_at FROM audit_events WHERE organization_id = $1 ORDER BY created_at DESC LIMIT 8",
+    )
+    .bind(org_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
+    let recent_review_cases: Vec<(Uuid, Uuid, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, verification_id, status, priority, created_at FROM review_cases WHERE organization_id = $1 ORDER BY created_at DESC LIMIT 5",
+    )
+    .bind(org_id)
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+
     Ok(Json(json!({
         "total_verifications": total.0,
         "approved_count": approved.0,
         "needs_review_count": needs_review.0,
-        "rejected_count": 0,
+        "rejected_count": rejected.0,
         "average_risk_score": avg_risk,
-        "webhook_success_rate": 0.95,
-        "recent_audit_events": [],
-        "recent_review_cases": []
+        "webhook_success_rate": webhook_success_rate,
+        "recent_audit_events": recent_audit_events.into_iter()
+            .map(|(event_type, actor, created_at)| json!({ "event_type": event_type, "actor": actor, "created_at": created_at }))
+            .collect::<Vec<_>>(),
+        "recent_review_cases": recent_review_cases.into_iter()
+            .map(|(id, vid, status, priority, created_at)| json!({ "id": id, "verification_id": vid, "status": status, "priority": priority, "created_at": created_at }))
+            .collect::<Vec<_>>(),
     })))
 }
 
@@ -370,6 +423,295 @@ pub async fn get_verification_detail(
     })))
 }
 
+// --- Review cases (dashboard, org-scoped, member as actor) ---
+
+pub async fn list_review_cases(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+) -> Result<Json<Vec<crate::domain::ReviewCase>>, AppError> {
+    let rows: Vec<(Uuid, Uuid, String, String, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as(
+            "SELECT id, verification_id, status, priority, created_at, resolved_at
+             FROM review_cases WHERE organization_id = $1 ORDER BY created_at DESC LIMIT 100",
+        )
+        .bind(ctx.organization_id)
+        .fetch_all(&state.pool)
+        .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(id, vid, status, priority, created, resolved)| crate::domain::ReviewCase {
+                id,
+                verification_id: vid,
+                status,
+                priority,
+                created_at: created,
+                resolved_at: resolved,
+            })
+            .collect(),
+    ))
+}
+
+pub async fn get_review_case(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let row: Option<(Uuid, Uuid, String, String, Option<String>, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>)> =
+        sqlx::query_as(
+            "SELECT id, verification_id, status, priority, resolution, created_at, resolved_at
+             FROM review_cases WHERE id = $1 AND organization_id = $2",
+        )
+        .bind(id)
+        .bind(ctx.organization_id)
+        .fetch_optional(&state.pool)
+        .await?;
+
+    let (rid, vid, status, priority, resolution, created_at, resolved_at) =
+        row.ok_or(AppError::NotFound)?;
+
+    let notes: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT author, note, created_at FROM review_notes WHERE review_case_id = $1 ORDER BY created_at",
+    )
+    .bind(rid)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(json!({
+        "id": rid,
+        "verification_id": vid,
+        "status": status,
+        "priority": priority,
+        "resolution": resolution,
+        "created_at": created_at,
+        "resolved_at": resolved_at,
+        "notes": notes.into_iter()
+            .map(|(author, note, created)| json!({ "author": author, "note": note, "created_at": created }))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+async fn resolve_review_case(
+    state: &AppState,
+    ctx: &DashboardContext,
+    review_id: Uuid,
+    outcome: &str, // "approved" | "rejected"
+    reason: Option<String>,
+) -> Result<(), AppError> {
+    let now = Utc::now();
+    let org_id = ctx.organization_id;
+
+    let updated = sqlx::query(
+        "UPDATE review_cases SET status = $1, resolved_at = $2, resolution = $3 WHERE id = $4 AND organization_id = $5",
+    )
+    .bind(outcome)
+    .bind(now)
+    .bind(reason.clone().unwrap_or_else(|| format!("{outcome} via dashboard")))
+    .bind(review_id)
+    .bind(org_id)
+    .execute(&state.pool)
+    .await?;
+
+    if updated.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    let vid_row: Option<(Uuid,)> =
+        sqlx::query_as("SELECT verification_id FROM review_cases WHERE id = $1 AND organization_id = $2")
+            .bind(review_id)
+            .bind(org_id)
+            .fetch_optional(&state.pool)
+            .await?;
+
+    if let Some((vid,)) = vid_row {
+        sqlx::query(
+            "UPDATE verifications SET status = $1, decision = $1, completed_at = $2, updated_at = $2 WHERE id = $3 AND organization_id = $4",
+        )
+        .bind(outcome)
+        .bind(now)
+        .bind(vid)
+        .bind(org_id)
+        .execute(&state.pool)
+        .await?;
+
+        sqlx::query(
+            "INSERT INTO audit_events (id, organization_id, verification_id, event_type, actor, payload, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(org_id)
+        .bind(vid)
+        .bind(format!("review.{outcome}"))
+        .bind(format!("dashboard:{}", ctx.email))
+        .bind(json!({ "review_case": review_id.to_string(), "reason": reason }))
+        .bind(now)
+        .execute(&state.pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
+pub async fn approve_review_case(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<crate::domain::ReviewDecisionBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    resolve_review_case(&state, &ctx, id, "approved", body.reason).await?;
+    Ok(Json(json!({ "status": "approved" })))
+}
+
+pub async fn reject_review_case(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<crate::domain::ReviewDecisionBody>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    resolve_review_case(&state, &ctx, id, "rejected", body.reason).await?;
+    Ok(Json(json!({ "status": "rejected" })))
+}
+
+pub async fn add_review_note(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<crate::domain::CreateReviewNote>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Scope check before writing the note.
+    let exists: Option<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM review_cases WHERE id = $1 AND organization_id = $2")
+            .bind(id)
+            .bind(ctx.organization_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    sqlx::query(
+        "INSERT INTO review_notes (id, review_case_id, organization_id, author, note, created_at) VALUES ($1,$2,$3,$4,$5,now())",
+    )
+    .bind(Uuid::new_v4())
+    .bind(id)
+    .bind(ctx.organization_id)
+    .bind(&ctx.email)
+    .bind(&body.note)
+    .execute(&state.pool)
+    .await?;
+
+    Ok(Json(json!({ "note_added": true })))
+}
+
+// --- Webhook deliveries (dashboard, org-scoped) ---
+
+pub async fn list_webhook_deliveries(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    let rows: Vec<(Uuid, Option<Uuid>, String, String, i32, Option<i32>, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as(
+            "SELECT id, verification_id, event_type, status, attempts, response_code, created_at
+             FROM webhook_deliveries WHERE organization_id = $1 ORDER BY created_at DESC LIMIT 100",
+        )
+        .bind(ctx.organization_id)
+        .fetch_all(&state.pool)
+        .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(id, vid, event_type, status, attempts, code, created)| {
+                json!({
+                    "id": id,
+                    "verification_id": vid,
+                    "event_type": event_type,
+                    "status": status,
+                    "attempts": attempts,
+                    "response_code": code,
+                    "created_at": created,
+                })
+            })
+            .collect(),
+    ))
+}
+
+pub async fn resend_webhook_delivery(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let updated = sqlx::query(
+        "UPDATE webhook_deliveries SET status='pending', next_attempt_at = now() WHERE id = $1 AND organization_id = $2",
+    )
+    .bind(id)
+    .bind(ctx.organization_id)
+    .execute(&state.pool)
+    .await?;
+
+    if updated.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(json!({ "resend_queued": true })))
+}
+
+// --- API request logs (dashboard, org-scoped) ---
+
+pub async fn list_api_requests(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<DashboardContext>,
+) -> Result<Json<Vec<crate::domain::ApiRequestLog>>, AppError> {
+    let rows: Vec<(Uuid, String, String, Option<i32>, Option<i32>, Option<String>, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as(
+            "SELECT id, method, path, status_code, latency_ms, request_id, created_at
+             FROM api_requests WHERE organization_id = $1 ORDER BY created_at DESC LIMIT 100",
+        )
+        .bind(ctx.organization_id)
+        .fetch_all(&state.pool)
+        .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(id, method, path, status, latency, req_id, created)| crate::domain::ApiRequestLog {
+                id,
+                method,
+                path,
+                status_code: status,
+                latency_ms: latency,
+                request_id: req_id,
+                created_at: created,
+            })
+            .collect(),
+    ))
+}
+
+// --- Source registry (dashboard) ---
+
+pub async fn list_sources(
+    State(state): State<AppState>,
+    Extension(_ctx): Extension<DashboardContext>,
+) -> Result<Json<Vec<crate::domain::VerificationSourceInfo>>, AppError> {
+    let rows: Vec<(String, String, String, String, bool, bool, Option<String>)> = sqlx::query_as(
+        "SELECT code, name, category, status, supports_person, supports_business, description
+         FROM verification_sources ORDER BY code",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|(code, name, category, status, sp, sb, desc)| crate::domain::VerificationSourceInfo {
+                code,
+                name,
+                category,
+                status,
+                supports_person: sp,
+                supports_business: sb,
+                description: desc,
+            })
+            .collect(),
+    ))
+}
+
 // --- API Key management from dashboard (owner/admin/developer) ---
 
 pub async fn list_api_keys(
@@ -380,15 +722,25 @@ pub async fn list_api_keys(
         return Err(AppError::BadRequest("insufficient permissions".into())); // use 403 in real error
     }
     let org_id = ctx.organization_id;
-    let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(
-        "SELECT id, partner_name, environment, COALESCE(display_prefix, '') FROM api_keys WHERE organization_id = $1 AND revoked_at IS NULL LIMIT 50"
+    let rows: Vec<(Uuid, String, String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, partner_name, environment, COALESCE(display_prefix, ''), created_at
+         FROM api_keys WHERE organization_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 50"
     )
     .bind(org_id)
     .fetch_all(&state.pool)
     .await
     .unwrap_or_default();
 
-    Ok(Json(json!({ "api_keys": rows })))
+    Ok(Json(json!(rows
+        .into_iter()
+        .map(|(id, partner_name, environment, display_prefix, created_at)| json!({
+            "id": id,
+            "partner_name": partner_name,
+            "environment": environment,
+            "display_prefix": display_prefix,
+            "created_at": created_at,
+        }))
+        .collect::<Vec<_>>())))
 }
 
 pub async fn create_api_key(
