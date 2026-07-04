@@ -2,6 +2,8 @@ mod auth;
 mod db;
 mod domain;
 mod error;
+mod middleware;
+mod risk;
 mod routes;
 mod sources;
 mod state;
@@ -40,8 +42,14 @@ async fn main() {
         tracing::info!("seeded 'public-demo' API key");
     }
 
-    let app = routes::router(state::AppState::new(pool))
+    let app_state = state::AppState::new(pool);
+
+    let app = routes::router(app_state.clone())
         .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            crate::middleware::request_id_and_logging,
+        ))
         // Permissive CORS is fine for local dev with the Next.js frontend;
         // tighten to the real origin before any public deployment.
         .layer(CorsLayer::permissive());

@@ -23,9 +23,10 @@ pub async fn connect_and_migrate(database_url: &str) -> Result<PgPool, sqlx::Err
 /// demo key on startup so the marketing-site demo works out of the box.
 /// Real partner keys should be issued out-of-band, not via env.
 pub async fn upsert_api_key(pool: &PgPool, name: &str, raw_key: &str) -> Result<(), sqlx::Error> {
+    // Default demo key to test environment
     sqlx::query(
-        "insert into api_keys (id, partner_name, key_hash)
-         values ($1, $2, $3)
+        "insert into api_keys (id, partner_name, key_hash, environment)
+         values ($1, $2, $3, 'test')
          on conflict (key_hash) do nothing",
     )
     .bind(Uuid::new_v4())
