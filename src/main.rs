@@ -54,7 +54,14 @@ async fn main() {
 
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
-        .allow_methods(tower_http::cors::Any)
+        .allow_methods(vec![
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+            axum::http::Method::PATCH,
+        ])
         .allow_headers(vec![
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
