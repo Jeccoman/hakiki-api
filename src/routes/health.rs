@@ -11,7 +11,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
             Json(json!({
                 "status": "healthy",
                 "database": "connected",
-                "service": "hakiki-api",
+                "service": "api-hakiki",
                 "version": env!("CARGO_PKG_VERSION"),
                 "timestamp": chrono::Utc::now().to_rfc3339()
             })),
@@ -24,7 +24,7 @@ pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
                     "status": "unhealthy",
                     "database": "disconnected",
                     "error": e.to_string(),
-                    "service": "hakiki-api",
+                    "service": "api-hakiki",
                     "version": env!("CARGO_PKG_VERSION"),
                     "timestamp": chrono::Utc::now().to_rfc3339()
                 })),
